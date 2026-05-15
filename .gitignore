@@ -1,0 +1,9 @@
+# Python / Backend
+venv/
+__pycache__/
+*.pyc
+.env
+
+# MacOS/Windows hidden files
+.DS_Store
+Thumbs.db
