@@ -1,11 +1,10 @@
-# taskhub-server/app.py
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from auth import require_auth, supabase
 import concurrent.futures
-from ai_service import generate_image_background_task # NEW IMPORT
+from ai_service import generate_image_background_task
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
@@ -17,7 +16,6 @@ limiter = Limiter(
     storage_uri="memory://" 
 )
 
-# NEW: Create a background thread pool
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 @app.route('/api/health', methods=['GET'])
@@ -25,52 +23,60 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 def health_check():
     return jsonify({"status": "healthy", "message": "TaskHub API is running."}), 200
 
-@app.route('/api/me', methods=['GET'])
-@require_auth
-def get_my_profile():
-    return jsonify({
-        "message": "Authentication successful",
-        "user_id": request.user.id,
-        "email": request.user.email
-    }), 200
-
-# UPDATED: The Generate Route
 @app.route('/api/generate', methods=['POST'])
 @require_auth
-@limiter.limit("5 per hour") 
+@limiter.limit("50 per hour") 
 def trigger_ai_generation():
     data = request.get_json()
     
-    # 1. Validate Input
-    if not data or 'prompt' not in data:
-        return jsonify({"error": "Missing 'prompt' in request body"}), 400
+    if not data or 'prompt' not in data or 'task_id' not in data or 'image_type' not in data:
+        return jsonify({"error": "Missing required fields"}), 400
         
+    task_id = data['task_id']
     prompt = data['prompt']
-    user_id = request.user.id
+    image_type = data['image_type']
+    original_image = data.get('original_image', '')
     
     try:
-        # 2. Create the Initial Task in Supabase (Status: Pending)
-        task_response = supabase.table('tasks').insert({
-            "user_id": user_id,
-            "title": f"AI Generation: {prompt[:20]}...",
-            "description": "Triggered via API",
-            "base_image_url": "none", # Adjust based on your schema requirements
-            "status": "pending"
-        }).execute()
+        # 1. Check if an image row already exists for this task and type
+        existing = supabase.table('generated_images').select('id').eq('task_id', task_id).eq('image_type', image_type).execute()
         
-        task_id = task_response.data[0]['id']
+        if existing.data and len(existing.data) > 0:
+            # UPDATE existing row
+            generation_id = existing.data[0]['id']
+            supabase.table('generated_images').update({
+                "prompt_used": prompt,
+                "status": "processing",
+                "image_url": "generating..." 
+            }).eq('id', generation_id).execute()
+        else:
+            # INSERT new row
+            insert_resp = supabase.table('generated_images').insert({
+                "task_id": task_id,
+                "image_type": image_type,
+                "prompt_used": prompt,
+                "status": "processing",
+                "image_url": "generating..." 
+            }).execute()
+            generation_id = insert_resp.data[0]['id']
         
-        # 3. Hand the heavy lifting off to the background thread!
-        executor.submit(generate_image_background_task, task_id, prompt, user_id)
+        # Fire background worker
+        executor.submit(
+            generate_image_background_task, 
+            task_id, 
+            generation_id, 
+            prompt, 
+            image_type, 
+            original_image
+        )
         
-        # 4. Immediately return a success message to the frontend
         return jsonify({
-            "message": "AI generation job queued successfully",
-            "task_id": task_id,
-            "status": "pending"
+            "message": f"Started generating {image_type}",
+            "status": "processing"
         }), 202
         
     except Exception as e:
+        print(f"\n❌ BACKEND ERROR: {str(e)}\n") 
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':

@@ -1,33 +1,34 @@
-# taskhub-server/ai_service.py
 import requests
-import urllib.parse
+import time
+import random
 from auth import supabase
 
-def generate_image_background_task(task_id: str, prompt: str, user_id: str):
+def generate_image_background_task(task_id: str, generation_id: str, prompt: str, image_type: str, original_image: str):
+    """
+    Background worker using the FREE Pollinations AI (Text-to-Image)
+    """
     try:
-        print(f"\n[DEBUG] ---------------------------------")
-        print(f"[DEBUG] Using Pollinations AI (No Token Required!)")
-        print(f"[DEBUG] ---------------------------------\n")
+        print(f"\n[BACKGROUND] Starting {image_type} for Task {task_id}")
         
-        print(f"[BACKGROUND] Starting REAL AI job for task: {task_id}")
-        supabase.table('tasks').update({"status": "processing"}).eq('id', task_id).execute()
+        # 1. GENERATE USING FREE TEXT-TO-IMAGE
+        # We combine your custom prompt with high-quality keywords
+        full_prompt = f"{prompt}, professional product photography, 8k resolution, photorealistic studio lighting"
+        print(f"[BACKGROUND] Asking Pollinations to generate: '{full_prompt}'...")
         
-        print(f"[BACKGROUND] Asking AI to draw: '{prompt}'...")
+        encoded_prompt = requests.utils.quote(full_prompt)
+        random_seed = random.randint(1, 1000000)
         
-        # Pollinations AI is incredibly simple: we just safely encode the prompt into the URL!
-        encoded_prompt = urllib.parse.quote(prompt)
-        ai_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?seed={random_seed}&width=1024&height=1024&nologo=true"
         
-        # We use a GET request instead of a POST request for this API
-        response = requests.get(ai_url)
-        
+        response = requests.get(image_url)
         if response.status_code != 200:
-            raise Exception(f"AI API Failed with status: {response.status_code}")
+            raise Exception("Failed to download image from AI provider.")
             
         image_bytes = response.content 
         
-        print(f"[BACKGROUND] Image generated! Uploading to Supabase...")
-        file_name = f"task_{task_id}.png"
+        # 2. UPLOAD TO SUPABASE STORAGE
+        print(f"[BACKGROUND] Uploading {image_type} to Supabase...")
+        file_name = f"task_{task_id}_{image_type}_{int(time.time())}.png"
         
         supabase.storage.from_("generated-images").upload(
             path=file_name,
@@ -37,18 +38,17 @@ def generate_image_background_task(task_id: str, prompt: str, user_id: str):
         
         final_image_url = supabase.storage.from_("generated-images").get_public_url(file_name)
         
-        supabase.table('generated_images').insert({
-            "task_id": task_id,
+        # 3. UPDATE THE CHECKLIST ROW
+        supabase.table('generated_images').update({
             "image_url": final_image_url,
-            "image_type": "creative_artistic", 
-            "prompt_used": prompt,
             "status": "completed"
-        }).execute()
+        }).eq('id', generation_id).execute()
         
-        supabase.table('tasks').update({"status": "completed"}).eq('id', task_id).execute()
+        # Mark parent task as in-progress
+        supabase.table('tasks').update({"status": "in_progress"}).eq('id', task_id).execute()
         
-        print(f"[BACKGROUND] Job {task_id} 100% COMPLETED successfully!")
+        print(f"[BACKGROUND] ✅ {image_type} COMPLETED successfully!")
 
     except Exception as e:
-        print(f"[BACKGROUND] ERROR in job {task_id}: {str(e)}")
-        supabase.table('tasks').update({"status": "pending"}).eq('id', task_id).execute()
+        print(f"[BACKGROUND] ❌ ERROR in {image_type}: {str(e)}")
+        supabase.table('generated_images').update({"status": "failed"}).eq('id', generation_id).execute()
